@@ -1,0 +1,247 @@
+// =============================================
+// Shelly Script: Ladeüberwachung mit Alamos FE2 Trigger
+// Zweites Script zur Stromverbrauchs-Überwachung
+// 
+// Zweck:
+// - Überwacht den aktuellen Stromverbrauch (apower) am Shelly Plug
+// - Erkennt zuverlässig Start und Ende eines "Ladevorgangs" (oder allgemein
+//   hoher Verbrauch) durch Schwellwert + Debounce
+// - Sendet bei Statuswechsel einen HTTP-Trigger an deinen Alamos FE2 Server
+//   über die Externe Schnittstelle (bewährte /rest/external/http Schnittstelle)
+// - Läuft stabil und ressourcenschonend direkt auf dem Shelly (Plug/Plus/Pro mit Power Monitoring)
+// - Vollständig konfigurierbar am Skript-Anfang
+//
+// Voraussetzungen / Einrichtung:
+// 1. In Alamos FE2:
+//    - Administration → Alarmeingang → "Externe Schnittstelle" aktivieren
+//    - HTTP GET (und optional POST) erlauben
+//    - Port meist 83 (gleicher Port wie Weboberfläche)
+//    - Ggf. unter "Gültige Absender" ein Shared-Secret für authorization eintragen
+//    - Den Alarmeingang so konfigurieren, dass Nachrichten mit z.B. "Ladevorgang"
+//      als Lagemeldung, Status oder Alarm verarbeitet werden (je nach deinem Workflow)
+// 2. Shelly:
+//    - Skript über Web-UI oder App hochladen und starten
+//    - Empfohlen: "Beim Systemstart ausführen" aktivieren (falls verfügbar)
+//    - Script-Log regelmäßig prüfen (print-Ausgaben)
+// 3. Netzwerk: Shelly und FE2-Server müssen sich erreichen können (LAN/WLAN)
+//
+// Sicherheitshinweis:
+// - Bei Nutzung im Feuerwehr-Umfeld: Authorization/Shared-Secret verwenden!
+// - Im lokalen Netz ist das Risiko gering, aber besser absichern.
+//
+// =============================================
+
+let CONFIG = {
+  // =========================================
+  // === 1. STROMÜBERWACHUNG / LADEERKENNUNG ===
+  // =========================================
+  powerThreshold: 50,          // Schwellwert in Watt.
+                               // Verbrauch > dieser Wert → "Ladevorgang aktiv"
+                               // Typische Werte:
+                               //   - 30-80W   → kleine Ladegeräte, Werkzeug, etc.
+                               //   - 200-500W → größere Verbraucher
+                               //   - 1000-3500W+ → E-Auto-Lader / Wallbox (1-phasig)
+                               // Teste deinen konkreten Verbraucher und passe an!
+
+  checkInterval: 5000,         // Abstand der Überprüfungen in Millisekunden
+                               // 3000-10000ms empfohlen (nicht zu häufig, spart Ressourcen)
+                               // 5000ms = alle 5 Sekunden
+
+  debounceCount: 3,            // Wie viele aufeinanderfolgende Messungen müssen
+                               // über/unter dem Schwellwert liegen, bevor ein
+                               // Statuswechsel (Start/Ende) ausgelöst wird?
+                               // Verhindert Fehltrigger bei kurzzeitigen Spitzen.
+                               // Bei 5000ms Intervall → 15 Sekunden Bestätigung.
+
+  // =========================================
+  // === 2. ALAMOS FE2 EXTERNE SCHNITTSTELLE ===
+  // =========================================
+  fe2Host: "192.168.1.50",     // IP-Adresse oder Hostname deines FE2-Servers
+                               // Beispiel: "192.168.178.42" oder "fe2.local"
+
+  fe2Port: 83,                 // Port der Externen Schnittstelle
+                               // Standard: 83 (gleich wie FE2-Weboberfläche)
+
+  endpointPath: "/rest/external/http",
+                               // Bewährter Pfad für einfache HTTP-Trigger
+                               // Manche Installationen nutzen /rest/external/
+                               // oder /rest/external/v2 – bei Bedarf anpassen.
+
+  sender: "Shelly-Ladeueberwachung-Oberndorf",
+                               // Wird im FE2 als Absender des Alarms/der Meldung angezeigt.
+                               // Gut für Filterung und Nachvollziehbarkeit.
+
+  authorization: "",           // Shared-Secret / API-Key aus FE2
+                               // → Alarmeingang → Externe Schnittstelle → "Gültige Absender"
+                               // Leer lassen ("") wenn nicht konfiguriert.
+                               // Empfehlung: Immer setzen für Sicherheit!
+
+  includePowerInMessage: true, // Soll der aktuelle Verbrauch (Watt) in der Nachricht stehen?
+                               // Sehr hilfreich zur Nachverfolgung.
+
+  messageStart: "Ladevorgang gestartet",
+                               // Text, der bei Erkennung hoher Last gesendet wird.
+                               // Du kannst das frei anpassen, z.B. "Wallbox aktiv - Fahrzeug lädt"
+                               // oder einen Code, den dein FE2-Alarmflow erkennt.
+
+  messageStop: "Ladevorgang beendet",
+                               // Text bei Abfall unter Schwellwert.
+                               // z.B. "Wallbox inaktiv" oder "Ladevorgang abgeschlossen"
+
+  // =========================================
+  // === 3. ZUSÄTZLICHE OPTIONEN ===
+  // =========================================
+  forceRelayOn: false,         // Soll das Relay des Shelly Plug immer eingeschaltet bleiben?
+                               // true  = wie im ersten Script (LED-Indikator) – nützlich, wenn
+                               //         der Plug die Last dauerhaft versorgen soll.
+                               // false = nur überwachen, Relay-Zustand nicht verändern.
+                               // Für reines Monitoring auf "false" lassen.
+
+  triggerOnScriptStart: false  // Soll beim Skript-Start (z.B. nach Reboot) sofort ein Trigger
+                               // gesendet werden, wenn gerade hoher Verbrauch herrscht?
+                               // false = nur echte Statuswechsel nach dem Start melden (empfohlen)
+                               // true  = auch Initialzustand melden (kann bei Reboots zu
+                               //         doppelten Meldungen führen)
+};
+
+// =============================================
+// Interne Variablen (nicht verändern)
+// =============================================
+let isCharging = false;
+let aboveCount = 0;
+let belowCount = 0;
+let initialized = false;
+
+// =============================================
+// Hilfsfunktionen
+// =============================================
+
+/**
+ * Relay bei Bedarf einschalten (nur wenn forceRelayOn = true)
+ */
+function ensureRelayOn() {
+  if (CONFIG.forceRelayOn) {
+    Shelly.call("Switch.Set", { id: 0, on: true });
+  }
+}
+
+/**
+ * Sendet den HTTP-Trigger an den Alamos FE2 Server
+ * über die Externe Schnittstelle.
+ * Verwendet bewährte GET-Methode mit Query-Parametern.
+ */
+function sendFE2Trigger(baseMessage, currentPower) {
+  let msg = baseMessage;
+
+  if (CONFIG.includePowerInMessage && typeof currentPower === "number") {
+    msg += " | Aktueller Verbrauch: " + currentPower.toFixed(1) + " W";
+  }
+
+  // URL aufbauen
+  let url = "http://" + CONFIG.fe2Host + ":" + CONFIG.fe2Port + CONFIG.endpointPath
+          + "?message=" + encodeURIComponent(msg)
+          + "&sender=" + encodeURIComponent(CONFIG.sender);
+
+  if (CONFIG.authorization && CONFIG.authorization.length > 0) {
+    url += "&authorization=" + encodeURIComponent(CONFIG.authorization);
+  }
+
+  // Optional: externalId für neuere FE2-Versionen (wird oft unterstützt)
+  // url += "&externalId=" + encodeURIComponent("shelly-lade-" + Date.now());
+
+  print(">>> FE2 Trigger wird gesendet:");
+  print("    Nachricht: " + msg);
+  print("    URL: " + url);
+
+  // HTTP GET aufrufen (timeout in Sekunden)
+  Shelly.call("HTTP.GET", {
+    url: url,
+    timeout: 8
+  }, function(result) {
+    if (result) {
+      if (result.code === 200 || result.code === 204 || result.code === 202) {
+        print("<<< FE2 Antwort: Erfolgreich (HTTP " + result.code + ")");
+      } else {
+        print("<<< FE2 Antwort: Fehler (HTTP " + result.code + ")");
+        if (result.body) {
+          print("    Body: " + result.body.substring(0, 200));
+        }
+      }
+    } else {
+      print("<<< FE2: Keine Antwort erhalten (Timeout oder Netzwerkproblem)");
+    }
+  });
+}
+
+/**
+ * Liest den aktuellen Verbrauch und erkennt Statuswechsel
+ */
+function checkPowerStatus() {
+  ensureRelayOn();
+
+  Shelly.call("Switch.GetStatus", { id: 0 }, function(result) {
+    if (!result || typeof result.apower === "undefined") {
+      print("WARNUNG: Konnte Power-Status nicht lesen");
+      return;
+    }
+
+    let power = result.apower;           // float in Watt
+    let isAboveThreshold = power > CONFIG.powerThreshold;
+
+    // === Initialisierung beim ersten Durchlauf ===
+    if (!initialized) {
+      isCharging = isAboveThreshold;
+      aboveCount = isAboveThreshold ? 1 : 0;
+      belowCount = isAboveThreshold ? 0 : 1;
+      initialized = true;
+
+      print("Skript initialisiert. Aktueller Status: " +
+            (isCharging ? "LADEVORGANG AKTIV" : "LEERLAUF") +
+            " bei " + power.toFixed(1) + " W");
+
+      // Optional: Beim Start triggern, wenn bereits aktiv
+      if (CONFIG.triggerOnScriptStart && isCharging) {
+        sendFE2Trigger(CONFIG.messageStart, power);
+      }
+      return;
+    }
+
+    // === Normale Erkennung von Statuswechseln ===
+    if (isAboveThreshold) {
+      aboveCount++;
+      belowCount = 0;
+
+      if (!isCharging && aboveCount >= CONFIG.debounceCount) {
+        isCharging = true;
+        sendFE2Trigger(CONFIG.messageStart, power);
+      }
+    } else {
+      belowCount++;
+      aboveCount = 0;
+
+      if (isCharging && belowCount >= CONFIG.debounceCount) {
+        isCharging = false;
+        sendFE2Trigger(CONFIG.messageStop, power);
+      }
+    }
+  });
+}
+
+// =============================================
+// Hauptprogramm
+// =============================================
+
+// Timer starten (wiederholt alle checkInterval ms)
+Timer.set(CONFIG.checkInterval, true, checkPowerStatus);
+
+// Begrüßung / Status beim Skript-Start
+print("=============================================");
+print("Ladeüberwachung mit FE2-Trigger gestartet");
+print("Schwellwert: " + CONFIG.powerThreshold + " W");
+print("Prüfintervall: " + CONFIG.checkInterval + " ms");
+print("Debounce: " + CONFIG.debounceCount + " Messungen");
+print("FE2 Ziel: http://" + CONFIG.fe2Host + ":" + CONFIG.fe2Port + CONFIG.endpointPath);
+print("=============================================");
+
+// Erster manueller Aufruf nach kurzer Verzögerung (manchmal hilfreich)
+Timer.set(1500, false, checkPowerStatus);
