@@ -67,7 +67,7 @@ let CONFIG = {
                                // Manche Installationen nutzen /rest/external/
                                // oder /rest/external/v2 – bei Bedarf anpassen.
 
-  sender: "Shelly-Ladeueberwachung-Oberndorf",
+  sender: "Shelly-Ladeueberwachung",
                                // Wird im FE2 als Absender des Alarms/der Meldung angezeigt.
                                // Gut für Filterung und Nachvollziehbarkeit.
 
