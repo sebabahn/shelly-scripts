@@ -130,6 +130,14 @@ function ensureRelayOn() {
  * über die Externe Schnittstelle.
  * Verwendet bewährte GET-Methode mit Query-Parametern.
  */
+/**
+ * Sendet den HTTP-Trigger an den Alamos FE2 Server
+ */
+
+/**
+ * Sendet den HTTP-Trigger an den Alamos FE2 Server
+ * (kompatibel mit älteren Shelly-Firmwares ohne RegEx)
+ */
 function sendFE2Trigger(baseMessage, currentPower) {
   let msg = baseMessage;
 
@@ -137,23 +145,39 @@ function sendFE2Trigger(baseMessage, currentPower) {
     msg += " | Aktueller Verbrauch: " + currentPower.toFixed(1) + " W";
   }
 
-  // URL aufbauen
-  let url = "http://" + CONFIG.fe2Host + ":" + CONFIG.fe2Port + CONFIG.endpointPath
-          + "?message=" + encodeURIComponent(msg)
-          + "&sender=" + encodeURIComponent(CONFIG.sender);
-
-  if (CONFIG.authorization && CONFIG.authorization.length > 0) {
-    url += "&authorization=" + encodeURIComponent(CONFIG.authorization);
+  // Einfache URL-Encoding ohne RegEx (Espruino-kompatibel)
+  function urlEncode(str) {
+    let encoded = "";
+    for (let i = 0; i < str.length; i++) {
+      let c = str.charAt(i);
+      if (c === " ") encoded += "%20";
+      else if (c === "&") encoded += "%26";
+      else if (c === "=") encoded += "%3D";
+      else if (c === "?") encoded += "%3F";
+      else if (c === "#") encoded += "%23";
+      else if (c === ":") encoded += "%3A";
+      else if (c === "/") encoded += "%2F";
+      else if (c === "+") encoded += "%2B";
+      else if (c === ",") encoded += "%2C";
+      else if (c === "%") encoded += "%25";
+      else encoded += c;
+    }
+    return encoded;
   }
 
-  // Optional: externalId für neuere FE2-Versionen (wird oft unterstützt)
-  // url += "&externalId=" + encodeURIComponent("shelly-lade-" + Date.now());
+  // URL aufbauen
+  let url = "" + CONFIG.fe2Host + ":" + CONFIG.fe2Port + CONFIG.endpointPath
+          + "?message=" + urlEncode(msg)
+          + "&sender=" + urlEncode(CONFIG.sender);
+
+  if (CONFIG.authorization && CONFIG.authorization.length > 0) {
+    url += "&authorization=" + urlEncode(CONFIG.authorization);
+  }
 
   print(">>> FE2 Trigger wird gesendet:");
   print("    Nachricht: " + msg);
   print("    URL: " + url);
 
-  // HTTP GET aufrufen (timeout in Sekunden)
   Shelly.call("HTTP.GET", {
     url: url,
     timeout: 8
@@ -163,15 +187,14 @@ function sendFE2Trigger(baseMessage, currentPower) {
         print("<<< FE2 Antwort: Erfolgreich (HTTP " + result.code + ")");
       } else {
         print("<<< FE2 Antwort: Fehler (HTTP " + result.code + ")");
-        if (result.body) {
-          print("    Body: " + result.body.substring(0, 200));
-        }
+        if (result.body) print("    Body: " + result.body.substring(0, 200));
       }
     } else {
       print("<<< FE2: Keine Antwort erhalten (Timeout oder Netzwerkproblem)");
     }
   });
 }
+
 
 /**
  * Liest den aktuellen Verbrauch und erkennt Statuswechsel
