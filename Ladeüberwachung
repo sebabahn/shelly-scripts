@@ -1,0 +1,66 @@
+// =============================================
+// Shelly Plug Power-LED-Indikator
+// Grün: Verbrauch <= Schwellwert
+// Rot: Verbrauch > Schwellwert
+// Immer eingeschaltet + Auto-ON nach Neustart
+// =============================================
+
+let CONFIG = {
+  threshold: 10,        // Schwellwert in Watt (hier einstellbar: z.B. 50W)
+  checkInterval: 1000,  // Prüfintervall in ms (5 Sekunden)
+  ledBrightness: 100,   // Helligkeit 0-100
+  green: [0, 100, 0],   // RGB Grün
+  red: [100, 0, 0]      // RGB Rot
+};
+
+// Relay immer eingeschaltet halten + nach Reboot
+function ensureRelayOn() {
+  Shelly.call("Switch.Set", { id: 0, on: true });
+}
+
+// LED-Farbe setzen
+function setLEDColor(rgb) {
+  let config = {
+    config: {
+      leds: {
+        mode: "switch",
+        colors: {
+          "switch:0": {
+            on: {
+              rgb: rgb,
+              brightness: CONFIG.ledBrightness
+            }
+          }
+        }
+      }
+    }
+  };
+  Shelly.call("PLUGS_UI.SetConfig", config);
+}
+
+// Status abrufen und LED anpassen
+function updateLED() {
+  Shelly.call("Switch.GetStatus", { id: 0 }, function(result) {
+    if (result && typeof result.apower !== "undefined") {
+      let power = result.apower; // Aktueller Verbrauch in Watt
+      
+      if (power > CONFIG.threshold) {
+        setLEDColor(CONFIG.green);
+      } else {
+        setLEDColor(CONFIG.red);
+      }
+    }
+  });
+}
+
+// Haupt-Timer
+Timer.set(CONFIG.checkInterval, true, function() {
+  ensureRelayOn();
+  updateLED();
+});
+
+// Beim Skript-Start einmalig ausführen
+ensureRelayOn();
+updateLED();
+
+print("Power-LED-Indikator gestartet. Schwellwert: " + CONFIG.threshold + "W");
