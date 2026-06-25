@@ -79,12 +79,12 @@ let CONFIG = {
   includePowerInMessage: true, // Soll der aktuelle Verbrauch (Watt) in der Nachricht stehen?
                                // Sehr hilfreich zur Nachverfolgung.
 
-  messageStart: "Ladevorgang gestartet",
+  messageStart: "Ladevorgang OK",
                                // Text, der bei Erkennung hoher Last gesendet wird.
                                // Du kannst das frei anpassen, z.B. "Wallbox aktiv - Fahrzeug lädt"
                                // oder einen Code, den dein FE2-Alarmflow erkennt.
 
-  messageStop: "Ladevorgang beendet",
+  messageStop: "Ladevorgang FEHLER",
                                // Text bei Abfall unter Schwellwert.
                                // z.B. "Wallbox inaktiv" oder "Ladevorgang abgeschlossen"
 
